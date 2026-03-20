@@ -1,0 +1,6 @@
+data*
+.env
+.git
+backtest_results.png
+trade_log*
+weekly_results*
