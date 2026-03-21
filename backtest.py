@@ -69,7 +69,7 @@ PARAMS = dict(
     sw_position_stop     = 0.05,
     sw_breakeven_trigger = 0.05,
     sw_trailing_stop     = 0.04,
-    sw_rr_ratio          = 3.0,    # TP at +15%
+    sw_rr_ratio          = 1.0,    # TP at +5%
     sw_size_cap          = 1.5,
     sw_size_floor        = 0.25,
     sw_target_var        = 0.0025,
@@ -93,7 +93,7 @@ PARAMS = dict(
     bear_position_stop     = 0.04, # tightest stop
     bear_breakeven_trigger = 0.04,
     bear_trailing_stop     = 0.03,
-    bear_rr_ratio          = 2.0,  # TP at +8% — take profits quickly
+    bear_rr_ratio          = 1.0,  # TP at +5% — take profits quickly
     bear_size_cap          = 1.0,  # never above base in bear
     bear_size_floor        = 0.25,
     bear_target_var        = 0.0025,
@@ -104,7 +104,7 @@ PARAMS = dict(
     # Fees
     maker_fee        = 0.0005,
     taker_fee        = 0.001,
-    use_limit_orders = True,
+    use_limit_orders = False,
 )
 
 

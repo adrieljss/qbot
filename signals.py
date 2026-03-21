@@ -58,7 +58,7 @@ def to_binance_symbol(roostoo_pair: str) -> str:
 # ── Parameters (identical to backtest.py PARAMS) ─────────────────────────────
 
 P: dict = dict(
-    min_avg_volume       = 5_000_000,   # relaxed for smaller alts on mock exchange
+    min_avg_volume       = 10_000_000,  
 
     # Shared indicators
     momentum_window      = 7,
@@ -82,7 +82,7 @@ P: dict = dict(
     sw_position_stop     = 0.05,
     sw_breakeven_trigger = 0.05,
     sw_trailing_stop     = 0.04,
-    sw_rr_ratio          = 3.0,     # TP = 3 × stop = +15 %
+    sw_rr_ratio          = 1.0,     # TP = 1 × stop = +5 %
     sw_size_cap          = 1.5,
     sw_size_floor        = 0.25,
     sw_target_var        = 0.0025,
@@ -108,7 +108,7 @@ P: dict = dict(
     bear_position_stop   = 0.04,
     bear_breakeven_trigger = 0.04,
     bear_trailing_stop   = 0.03,
-    bear_rr_ratio        = 2.0,    # TP = 2 × stop = +8 %
+    bear_rr_ratio        = 1.0,    # TP = 1 × stop = +4 %
     bear_size_cap        = 1.0,
     bear_size_floor      = 0.25,
     bear_target_var      = 0.0025,
