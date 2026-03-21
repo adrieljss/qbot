@@ -9,13 +9,25 @@ python -m venv venv # init
 
 1. Install libraries
 
-```py
+```bash
 pip install -r requirements.txt
+```
+
+2. Fill .env variables (copy .env.example)
+
+```
+ROOSTOO_API_KEY=
+ROOSTOO_SECRET=
+
+TELEGRAM_BOT_TOKEN=
+TELEGRAM_CHANNEL_ID=
+TELEGRAM_TOPIC_ID=
+INITIAL_CAPITAL=
 ```
 
 2. Run backtest
 
-```py
+```bash
 py download_data --start <start_date YYYY/MM/DD> --end <end_date YYYY/MM/DD> # this will create a data folder in the base directory
 py backtest.py --start <start_date YYYY/MM/DD> --end <end_date YYYY/MM/DD> --data <data_folder>
 ```
