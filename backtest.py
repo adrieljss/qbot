@@ -509,9 +509,11 @@ def run_hourly_loop(hourly_data, daily_data, positions, capital, peak,
             c_low  = float(h["low"].loc[h_ts])
             c_cls  = float(h["close"].loc[h_ts])
 
+            # Compute drop-from-peak BEFORE updating the rolling high
+            # (mirrors bot.py — avoids using a peak set in the same candle)
+            rf_hi   = (c_cls - pos["highest_price"]) / pos["highest_price"]
             pos["highest_price"] = max(pos["highest_price"], c_high)
             pos_ret = (c_cls - pos["entry_price"]) / pos["entry_price"]
-            rf_hi   = (c_cls - pos["highest_price"]) / pos["highest_price"]
 
             if sym not in rsi_cache or h_ts.hour == 0:
                 dh = daily_data.get(sym, pd.DataFrame()).loc[:h_day]
@@ -523,12 +525,14 @@ def run_hourly_loop(hourly_data, daily_data, positions, capital, peak,
             exit_trigger = None
             exit_price   = c_cls
 
-            if c_high >= pos["take_profit"]:
-                exit_trigger = "take_profit"
-                exit_price   = pos["take_profit"]
-            elif c_low <= pos["entry_price"] * (1 - position_stop):
+            # Check stop before TP: if both high≥TP and low≤stop in same candle,
+            # assume the stop filled first (conservative — avoids peak-sell bias)
+            if c_low <= pos["entry_price"] * (1 - position_stop):
                 exit_trigger = "position_stop"
                 exit_price   = pos["entry_price"] * (1 - position_stop)
+            elif c_high >= pos["take_profit"]:
+                exit_trigger = "take_profit"
+                exit_price   = pos["take_profit"]
             elif (pos["highest_price"] >= pos["entry_price"] * (1 + breakeven_trigger)
                   and rf_hi <= -trailing_stop):
                 exit_trigger = "trailing_stop"
@@ -1077,9 +1081,10 @@ def backtest_comp(p):
                 c_low  = float(h["low"].loc[h_ts])
                 c_cls  = float(h["close"].loc[h_ts])
 
+                # Compute drop-from-peak BEFORE updating the rolling high
+                rf_hi   = (c_cls - pos["highest_price"]) / pos["highest_price"]
                 pos["highest_price"] = max(pos["highest_price"], c_high)
                 pos_ret = (c_cls - pos["entry_price"]) / pos["entry_price"]
-                rf_hi   = (c_cls - pos["highest_price"]) / pos["highest_price"]
 
                 _stop    = pos.get("stop",    p["sw_position_stop"])
                 _be      = pos.get("be_trig", p["sw_breakeven_trigger"])
@@ -1098,12 +1103,13 @@ def backtest_comp(p):
                 exit_trigger = None
                 exit_price   = c_cls
 
-                if c_high >= _tp:
-                    exit_trigger = "take_profit"
-                    exit_price   = _tp
-                elif c_low <= pos["entry_price"] * (1 - _stop):
+                # Stop before TP: conservative ordering for same-candle conflicts
+                if c_low <= pos["entry_price"] * (1 - _stop):
                     exit_trigger = "position_stop"
                     exit_price   = pos["entry_price"] * (1 - _stop)
+                elif c_high >= _tp:
+                    exit_trigger = "take_profit"
+                    exit_price   = _tp
                 elif (pos["highest_price"] >= pos["entry_price"] * (1 + _be)
                       and rf_hi <= -_trail):
                     exit_trigger = "trailing_stop"
