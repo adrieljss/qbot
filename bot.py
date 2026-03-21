@@ -33,6 +33,10 @@ from typing import Optional
 
 import numpy as np
 from dotenv import load_dotenv
+from datetime import timezone, timedelta
+
+# Singapore Time = UTC+8 (no DST)
+SGT = timezone(timedelta(hours=8), name="SGT")
 
 # ── Env must load before any other import that reads env vars ─────────────────
 load_dotenv()
@@ -342,14 +346,15 @@ class TradingBot:
             )
 
     async def _cycle(self) -> None:
-        now       = datetime.now(timezone.utc)
+        now_utc   = datetime.now(timezone.utc)
+        now       = now_utc.astimezone(SGT)          # all business logic in SGT
         isoweek   = now.isocalendar()[1]
         isoyear   = now.isocalendar()[0]
-        weekday   = now.weekday()   # 0=Mon … 4=Fri
+        weekday   = now.weekday()                    # 0=Mon … 6=Sun
         is_monday = weekday == 0
-        week_key  = isoyear * 100 + isoweek   # unique across year boundaries
+        week_key  = isoyear * 100 + isoweek
 
-        log.info(f"──── cycle {now.strftime('%H:%M:%S UTC')} "
+        log.info(f"──── cycle {now.strftime('%Y-%m-%d %H:%M:%S SGT')} "
                  f"week={isoweek}  pos={list(self.positions)} ────")
 
         # 1. Sync balance from Roostoo
@@ -367,15 +372,38 @@ class TradingBot:
             if not math.isnan(sig.price):
                 self.last_prices[sym] = sig.price
 
-        # 3. Lock in a new weekly plan on Monday (or very first run)
+        # 3. Weekly plan logic
+        #
+        # "Too late to open" means there isn't enough time to hold a position
+        # meaningfully before the Friday 22:00 SGT weekly close:
+        #   - Friday any time  → close-only, never open
+        #   - Saturday/Sunday  → weekend, markets quiet, wait for Monday
+        #
+        # On first startup on a "good" day (Mon–Thu): make a plan immediately.
+        # On first startup on a bad day: wait, but mark the week so we don't
+        # spam the "waiting" message every cycle.
+        too_late = weekday == 4   # Friday(4)
+
         first_run    = self._plan_isoweek == -1
         new_monday   = is_monday and week_key != self._plan_isoweek
-        need_new_plan = first_run or new_monday
+        need_new_plan = (first_run or new_monday) and not too_late
+
+        if first_run and too_late:
+            if self._plan_isoweek != week_key:   # only log once
+                day_name = now.strftime("%A")
+                log.info(f"Startup on {day_name} SGT — waiting for Monday to open positions")
+                asyncio.create_task(self.tg.send(
+                    f"⏳ <b>Startup on {day_name}</b>\n"
+                    f"Too late in the week to open new positions.\n"
+                    f"Will make a plan on <b>Monday SGT</b>."
+                ))
+                self._plan_isoweek = week_key   # suppress repeat messages
+
         if need_new_plan:
-            self._weekly_plan   = snap
-            self._plan_isoweek  = week_key
-            self._plan_monday   = now
-            self._week_closed   = False
+            self._weekly_plan  = snap
+            self._plan_isoweek = week_key
+            self._plan_monday  = now
+            self._week_closed  = False
             plan_reason = "startup" if first_run else f"Monday week {isoweek}"
             log.info(
                 f"📅 New weekly plan ({plan_reason}): "
@@ -399,7 +427,6 @@ class TradingBot:
         self.last_regime = new_regime
 
         # 5. BEAR_GATE mid-week: liquidate all open positions immediately
-        #    (mirrors backtest — sit out entirely when weekly crash gate fires)
         if new_regime == "BEAR_GATE" and self.positions:
             log.warning("BEAR_GATE detected — liquidating all open positions")
             asyncio.create_task(self.tg.send(
@@ -422,14 +449,14 @@ class TradingBot:
         # 8. Exit checks every cycle (stop/TP/trailing use live prices)
         await self._check_exits(snap)
 
-        # 9. Enter positions — use locked weekly plan, 1 order per cycle,
-        #    scale allocations to currently free cash (not full capital)
+        # 9. Enter positions — Mon–Thu only, using locked weekly plan
         if (self._weekly_plan is not None
                 and new_regime != "BEAR_GATE"
-                and not self._week_closed):
+                and not self._week_closed
+                and not too_late):
             await self._enter_positions(self._weekly_plan, now)
 
-        # 10. Friday EOD: close all remaining positions (weekly exit)
+        # 10. Friday 22:00 SGT: weekly close
         if weekday == 4 and now.hour >= 22 and not self._week_closed:
             await self._weekly_close()
 
@@ -646,7 +673,7 @@ class TradingBot:
                 elif plan_age_days >= 3:
                     entry_trigger = "fallback_thursday"
                 else:
-                    log.debug(f"Waiting for red day on {sym} (plan day {plan_age_days})")
+                    log.info(f"⏳ Waiting for red day on {sym} (plan_age={plan_age_days}d, is_red={sig.is_red_day})")
                     continue
 
             # Scale alloc to free cash
@@ -753,7 +780,7 @@ class TradingBot:
             take_profit    = actual_tp,
             highest_price  = filled_price,
             regime         = regime,
-            entry_time     = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
+            entry_time     = datetime.now(SGT).strftime("%Y-%m-%d %H:%M SGT"),
             order_id       = order_id,
         )
 
@@ -854,7 +881,7 @@ class TradingBot:
     # ── Performance ───────────────────────────────────────────────────────────
 
     def _tick_weekly(self, now: datetime) -> None:
-        """Record a weekly return snapshot when the ISO week rolls over."""
+        """Record a weekly return snapshot when the ISO week rolls over (SGT)."""
         iso       = now.isocalendar()
         week_key  = iso[0] * 100 + iso[1]   # e.g. 202601 — unique across years
         if self._current_isoweek == -1:

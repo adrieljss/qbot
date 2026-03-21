@@ -6,3 +6,5 @@ trade_log*
 weekly_results*
 venv
 __pycache__
+bot.log
+ignore*
