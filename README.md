@@ -32,6 +32,12 @@ py download_data --start <start_date YYYY/MM/DD> --end <end_date YYYY/MM/DD> # t
 py backtest.py --start <start_date YYYY/MM/DD> --end <end_date YYYY/MM/DD> --data <data_folder>
 ```
 
+3. Run bot
+
+```bash
+py bot.py
+```
+
 # MRVS — Momentum-Reversal-Variance Sizing
 
 ### Regime-Switching Crypto Trading Strategy
