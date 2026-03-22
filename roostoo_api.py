@@ -85,12 +85,12 @@ class OrderType(str, Enum):
   MARKET = "MARKET"
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class ServerTime:
   server_time: int
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class TradePairInfo:
   coin: str
   coin_full_name: str
@@ -102,14 +102,14 @@ class TradePairInfo:
   mini_order: float
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class ExchangeInfo:
   is_running: bool
   initial_wallet: dict[str, float]
   trade_pairs: dict[str, TradePairInfo]
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class TickerEntry:
   max_bid: float
   min_ask: float
@@ -119,7 +119,7 @@ class TickerEntry:
   unit_trade_value: float
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class TickerResponse:
   success: bool
   err_msg: str
@@ -127,20 +127,20 @@ class TickerResponse:
   data: dict[str, TickerEntry]
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class BalanceEntry:
   free: float
   lock: float
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class BalanceResponse:
   success: bool
   err_msg: str
   wallet: dict[str, BalanceEntry]
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class PendingCountResponse:
   success: bool
   err_msg: str
@@ -148,7 +148,7 @@ class PendingCountResponse:
   order_pairs: dict[str, int]
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class OrderDetail:
   pair: str
   order_id: int
@@ -171,21 +171,21 @@ class OrderDetail:
   commission_percent: float
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class PlaceOrderResponse:
   success: bool
   err_msg: str
   order_detail: OrderDetail | None
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class QueryOrderResponse:
   success: bool
   err_msg: str
   order_matched: list[OrderDetail] | None
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class CancelOrderResponse:
   success: bool
   err_msg: str
