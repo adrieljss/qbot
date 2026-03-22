@@ -1,5 +1,16 @@
 {
   "positions": {
+    "ETHUSDT": {
+      "entry_price": 2083.53,
+      "shares": 86.8781,
+      "alloc": 181013.13,
+      "stop_price": 1979.3535,
+      "take_profit": 2187.7065,
+      "highest_price": 2083.53,
+      "regime": "SIDEWAYS",
+      "entry_time": "2026-03-23 00:07 SGT",
+      "order_id": null
+    },
     "SOLUSDT": {
       "entry_price": 89.63,
       "shares": 3135.618,
@@ -19,11 +30,11 @@
       "take_profit": 1.5118,
       "highest_price": 1.4398,
       "regime": "SIDEWAYS",
-      "entry_time": "2026-03-22 01:45 SGT",
+      "entry_time": "2026-03-23 00:07 SGT",
       "order_id": null
     }
   },
-  "capital": 1000000.0,
+  "capital": 976068.544911,
   "peak_capital": 1000000.0,
   "total_trades": 2,
   "last_regime": "SIDEWAYS",

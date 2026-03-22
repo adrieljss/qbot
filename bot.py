@@ -941,6 +941,125 @@ class TradingBot:
             trigger=entry_trigger, regime=regime))
         return True
 
+    async def _place_delta_buy(self, *, sym: str, delta_usd: float, price: float,
+                               stop_pct: float, tp_pct: float,
+                               regime: str, trigger: str) -> bool:
+        """
+        Buy additional shares of an already-held position (top-up).
+        Merges into the existing position dict rather than creating a new one.
+        """
+        if not self._can_order():
+            log.info(f"Rate-limit: skip delta BUY {sym}")
+            return False
+
+        pair = to_roostoo_pair(sym)
+        qty  = self._round_qty(pair, delta_usd / price)
+        if qty <= 0:
+            log.warning(f"Skip delta BUY {sym}: qty rounds to 0")
+            return False
+
+        log.info(f"→ DELTA BUY {sym}  qty={qty}  ≈{_usd(delta_usd)}  trigger={trigger}")
+        try:
+            resp = await asyncio.to_thread(
+                self.roostoo.place_order, pair=pair, side=Side.BUY,
+                order_type=OrderType.MARKET, quantity=qty)
+        except Exception as exc:
+            log.error(f"Delta BUY error {sym}: {exc}"); return False
+        if not resp.success:
+            log.error(f"Delta BUY rejected {sym}: {resp.err_msg}"); return False
+
+        self._last_order_ts   = time.time()
+        self._last_order_date = datetime.now(SGT).strftime("%Y-%m-%d")
+        self.total_trades    += 1
+
+        det        = resp.order_detail
+        fill_price = det.filled_aver_price if det and det.filled_aver_price else price
+        fill_qty   = det.filled_quantity    if det and det.filled_quantity    else qty
+
+        if sym in self.positions:
+            pos = self.positions[sym]
+            # Weighted average entry price
+            old_cost = pos["entry_price"] * pos["shares"]
+            new_cost = fill_price * fill_qty
+            pos["shares"]      += fill_qty
+            pos["alloc"]       += delta_usd
+            pos["entry_price"]  = (old_cost + new_cost) / pos["shares"]
+            # Keep tightest stop (don't move stop up on top-up)
+            new_stop = fill_price * (1 - stop_pct)
+            pos["stop_price"]   = max(pos["stop_price"], new_stop)
+            if tp_pct > 0:
+                pos["take_profit"] = pos["entry_price"] * (1 + tp_pct)
+        else:
+            # Shouldn't happen but handle gracefully
+            stop_price = fill_price * (1 - stop_pct)
+            tp_price   = fill_price * (1 + tp_pct) if tp_pct > 0 else float("inf")
+            self.positions[sym] = dict(
+                entry_price=fill_price, shares=fill_qty, alloc=delta_usd,
+                stop_price=stop_price, take_profit=tp_price,
+                highest_price=fill_price, regime=regime,
+                entry_time=_now_sgt(), order_id=None)
+
+        log.info(f"✓ DELTA BUY {sym}  fill={_usd(fill_price)}  qty={fill_qty}  trigger={trigger}")
+        asyncio.create_task(self.tg.notify_trade(
+            action="BUY", symbol=sym, pair=pair,
+            price=fill_price, quantity=fill_qty, value_usd=delta_usd,
+            trigger=trigger, regime=regime))
+        return True
+
+    async def _place_delta_sell(self, *, sym: str, trim_usd: float, price: float,
+                                trigger: str) -> bool:
+        """
+        Sell a partial slice of an existing position (trim).
+        Reduces shares and alloc proportionally without closing the full position.
+        """
+        if sym not in self.positions:
+            return False
+        if not self._can_order():
+            log.info(f"Rate-limit: skip delta SELL {sym}")
+            return False
+
+        pos      = self.positions[sym]
+        pair     = to_roostoo_pair(sym)
+        trim_qty = self._round_qty(pair, trim_usd / price)
+        # Never sell more than we hold
+        trim_qty = min(trim_qty, self._round_qty(pair, pos["shares"] * 0.99))
+        if trim_qty <= 0:
+            log.warning(f"Skip delta SELL {sym}: qty rounds to 0")
+            return False
+
+        log.info(f"→ DELTA SELL {sym}  qty={trim_qty}  ≈{_usd(trim_usd)}  trigger={trigger}")
+        try:
+            resp = await asyncio.to_thread(
+                self.roostoo.place_order, pair=pair, side=Side.SELL,
+                order_type=OrderType.MARKET, quantity=trim_qty)
+        except Exception as exc:
+            log.error(f"Delta SELL error {sym}: {exc}"); return False
+        if not resp.success:
+            log.error(f"Delta SELL rejected {sym}: {resp.err_msg}"); return False
+
+        self._last_order_ts   = time.time()
+        self._last_order_date = datetime.now(SGT).strftime("%Y-%m-%d")
+        self.total_trades    += 1
+
+        det        = resp.order_detail
+        fill_price = det.filled_aver_price if det and det.filled_aver_price else price
+        fill_qty   = det.filled_quantity    if det and det.filled_quantity    else trim_qty
+        proceeds   = fill_qty * fill_price
+        pnl        = fill_qty * (fill_price - pos["entry_price"])
+
+        # Reduce position proportionally
+        fraction        = fill_qty / pos["shares"]
+        pos["shares"]  -= fill_qty
+        pos["alloc"]   -= pos["alloc"] * fraction
+
+        log.info(f"✓ DELTA SELL {sym}  fill={_usd(fill_price)}  qty={fill_qty}  "
+                 f"pnl={_usd(pnl)}  remaining={pos['shares']:.4f}  trigger={trigger}")
+        asyncio.create_task(self.tg.notify_trade(
+            action="SELL", symbol=sym, pair=pair,
+            price=fill_price, quantity=fill_qty, value_usd=proceeds,
+            trigger=trigger, regime=pos.get("regime", "?"), pnl=pnl))
+        return True
+
     async def _place_sell(self, sym: str, *, trigger: str, exit_price: float) -> None:
         if sym not in self.positions:
             return
