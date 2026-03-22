@@ -230,7 +230,7 @@ class TradingBot:
         first_run  = self._plan_week_key == -1
         too_late   = weekday >= 4    # Fri(4) Sat(5) Sun(6) — don't create new plans
         is_friday  = weekday == 4    # Friday only — don't open new positions either
-        new_monday = (weekday == 0) and (wk != self._plan_week_key)
+        new_monday = (weekday == 0) and (now.hour >= 8) and (wk != self._plan_week_key)
 
         if first_run:
             # Just mark the current week so we don't spam logs, but don't trade
