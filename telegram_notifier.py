@@ -207,20 +207,26 @@ class TelegramNotifier:
         m  = b.metrics()
         re = b.last_regime
         snap = b.last_snapshot
-        pnl_usd  = b.capital - b.initial_capital
-        pnl_pct  = pnl_usd / b.initial_capital if b.initial_capital else 0.0
-        dd_pct   = (b.capital - b.peak_capital) / b.peak_capital \
-                   if b.peak_capital else 0.0
-        last_upd = snap.computed_at.strftime("%H:%M:%S UTC") \
-                   if snap else "not yet"
+
+        # PnL = sum of unrealised PnL across all open positions
+        # (current price - entry price) × shares
+        pnl_usd = sum(
+            pos["shares"] * (b.last_prices.get(sym, pos["entry_price"]) - pos["entry_price"])
+            for sym, pos in b.positions.items()
+        )
+        cost_basis = sum(pos["alloc"] for pos in b.positions.values())
+        pnl_pct    = pnl_usd / b.initial_capital if b.initial_capital else 0.0
+        dd_pct     = (b.capital - b.peak_capital) / b.peak_capital \
+                     if b.peak_capital else 0.0
+        last_upd   = snap.computed_at.strftime("%H:%M:%S SGT") \
+                     if snap else "not yet"
 
         lines = [
             f"📊 <b>MRVS Bot — Status</b>",
             "",
             f"Regime    : {REGIME_EMOJI.get(re,'')} <code>{re}</code>",
-            f"Capital   : <code>{_usd(b.capital)}</code>",
-            f"Total PnL : <code>{_usd(pnl_usd)} ({_pct(pnl_pct)})</code>",
-            f"Peak      : <code>{_usd(b.peak_capital)}</code>",
+            f"Deployed  : <code>{_usd(cost_basis)}</code>",
+            f"Unrealised: <code>{_usd(pnl_usd)} ({_pct(pnl_pct)})</code>",
             f"Drawdown  : <code>{_pct(dd_pct)}</code>",
             "",
             f"Sharpe    : <code>{_f(m.get('sharpe'))}</code>",

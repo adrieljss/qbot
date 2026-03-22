@@ -25,6 +25,7 @@ Run:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import math
 import os
@@ -67,7 +68,8 @@ SGT              = timezone(timedelta(hours=8), name="SGT")
 LOOP_INTERVAL_S  = 60
 MIN_ORDER_GAP_S  = 61
 MIN_ORDER_USD    = 10.0
-ROTATION_HOUR    = 9    # 09:00 SGT — daily rebalance window
+ROTATION_HOUR    = 9
+STATE_FILE       = "state.json"    # 09:00 SGT — daily rebalance window
 
 # A position must have drifted more than this fraction from its target weight
 # before the rebalance trims/tops it. Keeps orders small and strategy-neutral.
@@ -142,6 +144,61 @@ class TradingBot:
         self._running = False
         log.info(f"TradingBot init  capital=${self.initial_capital:,.0f}")
 
+    # ── State persistence ─────────────────────────────────────────────────────
+
+    def _save_state(self) -> None:
+        """Persist positions and capital to state.json after every cycle."""
+        try:
+            data = {
+                "positions":        self.positions,
+                "capital":          self.capital,
+                "peak_capital":     self.peak_capital,
+                "total_trades":     self.total_trades,
+                "last_regime":      self.last_regime,
+                "plan_week_key":    self._plan_week_key,
+                "week_closed":      self._week_closed,
+                "last_rebalance_date": self._last_rebalance_date,
+                "last_order_date":  self._last_order_date,
+                "weekly_returns":   list(self._weekly_returns),
+                "week_start_cap":   self._week_start_cap,
+                "current_week_key": self._current_week_key,
+            }
+            with open(STATE_FILE, "w") as f:
+                json.dump(data, f, indent=2)
+        except Exception as exc:
+            log.warning(f"State save failed: {exc}")
+
+    def _load_state(self) -> bool:
+        """Load positions and capital from state.json. Returns True if loaded."""
+        try:
+            with open(STATE_FILE) as f:
+                data = json.load(f)
+            self.positions       = data.get("positions", {})
+            self.capital         = data.get("capital", self.initial_capital)
+            self.peak_capital    = data.get("peak_capital", self.initial_capital)
+            self.total_trades    = data.get("total_trades", 0)
+            self.last_regime     = data.get("last_regime", "UNKNOWN")
+            self._plan_week_key  = data.get("plan_week_key", -1)
+            self._week_closed    = data.get("week_closed", False)
+            self._last_rebalance_date = data.get("last_rebalance_date")
+            self._last_order_date     = data.get("last_order_date")
+            self._week_start_cap      = data.get("week_start_cap", self.initial_capital)
+            self._current_week_key    = data.get("current_week_key", -1)
+            for r in data.get("weekly_returns", []):
+                self._weekly_returns.append(r)
+            log.info(
+                f"State loaded: {len(self.positions)} positions  "
+                f"capital={_usd(self.capital)}  "
+                f"pos={list(self.positions.keys())}"
+            )
+            return True
+        except FileNotFoundError:
+            log.info("No state.json found — starting fresh")
+            return False
+        except Exception as exc:
+            log.warning(f"State load failed: {exc} — starting fresh")
+            return False
+
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
     async def run(self) -> None:
@@ -149,44 +206,52 @@ class TradingBot:
         self._running = True
         log.info("Trading loop started")
         await self._load_exchange_info()
-        # Orphan cleanup skipped — bot restarted with live positions, Monday will reconcile
-        log.info("Startup: skipping orphan cleanup — waiting for Monday plan")
-        await self.tg.send("🔄 <b>Bot restarted</b> — monitoring existing positions. New plan on Monday SGT.")
 
-        # Place a tiny $10 starter position into the top selected coin so the
-        # bot has something in self.positions for rebalance/guarantee to work with.
-        # This also satisfies the competition's daily activity requirement on restart.
-        try:
-            snap0 = await asyncio.to_thread(generate_signals, self.binance, SYMBOLS, self.capital)
-            if snap0.selected_symbols:
-                top_sym   = snap0.selected_symbols[0]
-                top_sig   = snap0.signals.get(top_sym)
-                top_price = snap0.signals[top_sym].price if top_sym in snap0.signals else 0.0
-                if top_sig and not math.isnan(top_price) and top_price > 0:
-                    regime = snap0.regime.regime
-                    if regime == "BULL":
-                        stop_pct = P["bull_position_stop"]; tp_pct = 0.0
-                    elif regime == "BEAR":
-                        stop_pct = P["bear_position_stop"]
-                        tp_pct   = P["bear_rr_ratio"] * stop_pct
-                    else:
-                        stop_pct = P["sw_position_stop"]
-                        tp_pct   = P["sw_rr_ratio"] * stop_pct
-                    log.info(f"Startup: placing $10 seed position in {top_sym}")
-                    await self._place_buy(
-                        sym          = top_sym,
-                        alloc        = 10.0,
-                        price        = top_price,
-                        stop_price   = top_price * (1 - stop_pct),
-                        tp_price     = top_price * (1 + tp_pct) if tp_pct > 0 else float("inf"),
-                        regime       = regime,
-                        entry_trigger= "startup_seed",
-                    )
-                    self._weekly_plan = snap0
-                    self._plan_week_key = snap0.computed_at.isocalendar()[0] * 100 + snap0.computed_at.isocalendar()[1]
-                    self._plan_anchor   = datetime.now(SGT)
-        except Exception as exc:
-            log.warning(f"Startup seed position failed: {exc}")
+        # Load persisted state first — restores positions, capital, etc.
+        loaded = self._load_state()
+
+        if loaded and self.positions:
+            log.info(f"Resumed with {len(self.positions)} persisted positions: {list(self.positions.keys())}")
+            await self.tg.send(
+                f"🔄 <b>Bot restarted — state restored</b>\n"
+                f"Positions: <code>{', '.join(self.positions.keys())}</code>\n"
+                f"Capital: <code>{_usd(self.capital)}</code>\n"
+                f"New plan on Monday SGT."
+            )
+        else:
+            log.info("Startup: no persisted state — placing $10 seed position")
+            await self.tg.send("🔄 <b>Bot started</b> — placing seed position. New plan on Monday SGT.")
+            # Place a tiny $10 starter so rebalance/guarantee have something to work with
+            try:
+                snap0 = await asyncio.to_thread(generate_signals, self.binance, SYMBOLS, self.capital)
+                if snap0.selected_symbols:
+                    top_sym   = snap0.selected_symbols[0]
+                    top_sig   = snap0.signals.get(top_sym)
+                    top_price = top_sig.price if top_sig else 0.0
+                    if top_sig and not math.isnan(top_price) and top_price > 0:
+                        regime = snap0.regime.regime
+                        if regime == "BULL":
+                            stop_pct = P["bull_position_stop"]; tp_pct = 0.0
+                        elif regime == "BEAR":
+                            stop_pct = P["bear_position_stop"]
+                            tp_pct   = P["bear_rr_ratio"] * stop_pct
+                        else:
+                            stop_pct = P["sw_position_stop"]
+                            tp_pct   = P["sw_rr_ratio"] * stop_pct
+                        await self._place_buy(
+                            sym           = top_sym,
+                            alloc         = 10.0,
+                            price         = top_price,
+                            stop_price    = top_price * (1 - stop_pct),
+                            tp_price      = top_price * (1 + tp_pct) if tp_pct > 0 else float("inf"),
+                            regime        = regime,
+                            entry_trigger = "startup_seed",
+                        )
+                        self._weekly_plan   = snap0
+                        self._plan_week_key = snap0.computed_at.isocalendar()[0] * 100 + snap0.computed_at.isocalendar()[1]
+                        self._plan_anchor   = datetime.now(SGT)
+            except Exception as exc:
+                log.warning(f"Startup seed failed: {exc}")
         try:
             while self._running:
                 t0 = time.monotonic()
@@ -230,7 +295,7 @@ class TradingBot:
         first_run  = self._plan_week_key == -1
         too_late   = weekday >= 4    # Fri(4) Sat(5) Sun(6) — don't create new plans
         is_friday  = weekday == 4    # Friday only — don't open new positions either
-        new_monday = (weekday == 0) and (now.hour >= 8) and (wk != self._plan_week_key)
+        new_monday = (weekday == 0) and (wk != self._plan_week_key)
 
         if first_run:
             # Just mark the current week so we don't spam logs, but don't trade
@@ -323,23 +388,20 @@ class TradingBot:
                 self.tg.notify_regime_change(self.last_regime, new_regime))
         self.last_regime = new_regime
 
-        # 5. BEAR_GATE — liquidate and sit out
-        if new_regime == "BEAR_GATE" and self.positions:
-            log.warning("BEAR_GATE: liquidating all positions")
-            asyncio.create_task(self.tg.send(
-                "🚫 <b>BEAR_GATE</b> — BTC −10 % this week. Sitting out."))
-            for sym in list(self.positions.keys()):
-                price = self.last_prices.get(sym, self.positions[sym]["entry_price"])
-                await self._place_sell(sym, trigger="bear_gate", exit_price=price)
-                if self.positions:
-                    await asyncio.sleep(MIN_ORDER_GAP_S)
+        # 5. BEAR_GATE — alert only, no forced liquidation
+        #    Individual position stops will handle exits if the market keeps falling.
+        if new_regime == "BEAR_GATE":
+            if self.positions:
+                log.warning("BEAR_GATE detected — alerting only, NOT liquidating (stops will handle exits)")
+                asyncio.create_task(self.tg.send(
+                    "🚫 <b>BEAR_GATE</b> — BTC −10% this week.\n"
+                    "Monitoring existing positions. No new entries until regime clears."))
 
         # 6. Weekly performance tracking
         self._tick_weekly(now)
 
-        # 7. Portfolio stop
-        if not await self._check_portfolio_stop():
-            return
+        # 7. Portfolio stop — alert only, does not liquidate
+        await self._check_portfolio_stop()
 
         # 8. Per-position exit checks (stop / TP / trailing / RSI)
         await self._check_exits(snap)
@@ -381,6 +443,7 @@ class TradingBot:
 
         log.info(f"capital={_usd(self.capital)}  peak={_usd(self.peak_capital)}  "
                  f"pos={list(self.positions)}  regime={new_regime}")
+        self._save_state()
 
     # ── Exchange info ─────────────────────────────────────────────────────────
 
@@ -480,27 +543,33 @@ class TradingBot:
             log.warning(f"Balance error: {resp.err_msg}"); return
         usd_e    = resp.wallet.get("USD") or resp.wallet.get("USDT")
         free_usd = usd_e.free if usd_e else 0.0
-        mtm = sum(
-            pos["shares"] * self.last_prices.get(sym, pos["entry_price"])
-            for sym, pos in self.positions.items())
-        self.capital      = free_usd + mtm
+
+        # Capital = initial capital + unrealised PnL on all open positions
+        # PnL per position = (current price - entry price) × shares
+        # Using initial_capital as the fixed reference so % PnL is vs starting portfolio
+        unrealised_pnl = sum(
+            pos["shares"] * (self.last_prices.get(sym, pos["entry_price"]) - pos["entry_price"])
+            for sym, pos in self.positions.items()
+        )
+        self.capital      = self.initial_capital + unrealised_pnl
         self.peak_capital = max(self.peak_capital, self.capital)
-        log.debug(f"Balance: free={_usd(free_usd)}  mtm={_usd(mtm)}  total={_usd(self.capital)}")
+        log.debug(f"Balance: free_usd={_usd(free_usd)}  unrealised_pnl={_usd(unrealised_pnl)}  "
+                  f"capital={_usd(self.capital)}  ({unrealised_pnl/self.initial_capital:+.2%})")
 
     # ── Portfolio stop ────────────────────────────────────────────────────────
 
     async def _check_portfolio_stop(self) -> bool:
+        """
+        Alert only — never liquidates positions.
+        The per-position hard stops and trailing stops protect individual positions.
+        A portfolio-level forced liquidation would crystallise losses at the worst moment.
+        """
         threshold = self.peak_capital * (1.0 - P["portfolio_stop"])
         if self.capital >= threshold:
             return True
-        log.warning(f"Portfolio stop: {_usd(self.capital)} < {_usd(threshold)}")
+        log.warning(f"Portfolio stop threshold breached: {_usd(self.capital)} < {_usd(threshold)} — ALERT ONLY, not liquidating")
         asyncio.create_task(self.tg.notify_portfolio_stop(self.capital, self.peak_capital))
-        for sym in list(self.positions.keys()):
-            price = self.last_prices.get(sym, self.positions[sym]["entry_price"])
-            await self._place_sell(sym, trigger="portfolio_stop", exit_price=price)
-            if self.positions:
-                await asyncio.sleep(MIN_ORDER_GAP_S)
-        return False
+        return True   # always return True — individual stops handle exits
 
     # ── Per-position exit checks ──────────────────────────────────────────────
 
