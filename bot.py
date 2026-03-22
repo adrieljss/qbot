@@ -149,7 +149,44 @@ class TradingBot:
         self._running = True
         log.info("Trading loop started")
         await self._load_exchange_info()
-        await self._cleanup_orphan_positions()
+        # Orphan cleanup skipped — bot restarted with live positions, Monday will reconcile
+        log.info("Startup: skipping orphan cleanup — waiting for Monday plan")
+        await self.tg.send("🔄 <b>Bot restarted</b> — monitoring existing positions. New plan on Monday SGT.")
+
+        # Place a tiny $10 starter position into the top selected coin so the
+        # bot has something in self.positions for rebalance/guarantee to work with.
+        # This also satisfies the competition's daily activity requirement on restart.
+        try:
+            snap0 = await asyncio.to_thread(generate_signals, self.binance, SYMBOLS, self.capital)
+            if snap0.selected_symbols:
+                top_sym   = snap0.selected_symbols[0]
+                top_sig   = snap0.signals.get(top_sym)
+                top_price = snap0.signals[top_sym].price if top_sym in snap0.signals else 0.0
+                if top_sig and not math.isnan(top_price) and top_price > 0:
+                    regime = snap0.regime.regime
+                    if regime == "BULL":
+                        stop_pct = P["bull_position_stop"]; tp_pct = 0.0
+                    elif regime == "BEAR":
+                        stop_pct = P["bear_position_stop"]
+                        tp_pct   = P["bear_rr_ratio"] * stop_pct
+                    else:
+                        stop_pct = P["sw_position_stop"]
+                        tp_pct   = P["sw_rr_ratio"] * stop_pct
+                    log.info(f"Startup: placing $10 seed position in {top_sym}")
+                    await self._place_buy(
+                        sym          = top_sym,
+                        alloc        = 10.0,
+                        price        = top_price,
+                        stop_price   = top_price * (1 - stop_pct),
+                        tp_price     = top_price * (1 + tp_pct) if tp_pct > 0 else float("inf"),
+                        regime       = regime,
+                        entry_trigger= "startup_seed",
+                    )
+                    self._weekly_plan = snap0
+                    self._plan_week_key = snap0.computed_at.isocalendar()[0] * 100 + snap0.computed_at.isocalendar()[1]
+                    self._plan_anchor   = datetime.now(SGT)
+        except Exception as exc:
+            log.warning(f"Startup seed position failed: {exc}")
         try:
             while self._running:
                 t0 = time.monotonic()
@@ -187,48 +224,94 @@ class TradingBot:
             if not math.isnan(sig.price):
                 self.last_prices[sym] = sig.price
 
-        # 3. Weekly plan — Mon SGT new plan; first run any day except Fri/Sat/Sun
+        # 3. Weekly plan — only created on Monday SGT.
+        #    On first startup we never auto-create a plan regardless of day,
+        #    to avoid accidentally closing live positions. Monday will reconcile.
         first_run  = self._plan_week_key == -1
-        too_late   = weekday == 4    # Fri(4) Sat(5) Sun(6) — don't open new positions
+        too_late   = weekday >= 4    # Fri(4) Sat(5) Sun(6) — don't create new plans
+        is_friday  = weekday == 4    # Friday only — don't open new positions either
         new_monday = (weekday == 0) and (wk != self._plan_week_key)
 
-        if first_run and too_late:
-            # Startup on a bad day — suppress until Monday
+        if first_run:
+            # Just mark the current week so we don't spam logs, but don't trade
             if self._plan_week_key != wk:
-                day_name = now.strftime("%A")
-                log.info(f"Startup on {day_name} SGT — waiting for Monday")
-                asyncio.create_task(self.tg.send(
-                    f"⏳ <b>Startup on {day_name}</b>\n"
-                    f"Will make a plan on Monday SGT."))
-                self._plan_week_key = wk   # suppress repeat messages
-        elif first_run or new_monday:
+                self._plan_week_key = wk
+                log.info(f"Startup ({now.strftime('%A')} SGT) — holding existing positions, plan on Monday")
+        elif new_monday:
             self._weekly_plan    = snap
             self._plan_week_key  = wk
             self._plan_anchor    = now
             self._week_closed    = False
-            reason = "startup" if first_run else f"Monday week {iso[1]}"
-            log.info(f"📅 Plan ({reason}): {snap.regime.regime}  {snap.selected_symbols}")
+            log.info(f"📅 Plan (Monday week {iso[1]}): {snap.regime.regime}  {snap.selected_symbols}")
 
-            # Exit any positions not in the new plan (mirrors backtest plan_change)
-            # Only on Monday (not first startup — orphan cleanup handles that)
-            if new_monday:
-                dropped = [s for s in list(self.positions.keys())
-                           if s not in snap.selected_symbols]
-                if dropped:
-                    log.info(f"Plan change: closing dropped positions {dropped}")
-                    asyncio.create_task(self.tg.send(
-                        f"🔄 <b>Plan change — week {iso[1]}</b>\n"
-                        f"Closing dropped: <code>{', '.join(dropped)}</code>\n"
-                        f"New plan: <code>{', '.join(snap.selected_symbols) or 'none'}</code>"
-                    ))
-                    for sym in dropped:
-                        price = self.last_prices.get(sym, self.positions[sym]["entry_price"])
-                        await self._place_sell(sym, trigger="plan_change", exit_price=price)
-                        if self.positions:
-                            await asyncio.sleep(MIN_ORDER_GAP_S)
+            # Reconcile carried positions against new plan:
+            # - Coins NOT in new plan → full close (plan_change)
+            # - Coins IN new plan but wrong size → delta adjust
+            # - Coins IN new plan at right size → leave untouched
+            new_selected = set(snap.selected_symbols)
+
+            # 1. Full close for dropped coins
+            dropped = [s for s in list(self.positions.keys())
+                       if s not in new_selected]
+            if dropped:
+                log.info(f"Plan change: closing dropped {dropped}")
+                asyncio.create_task(self.tg.send(
+                    f"🔄 <b>Plan change — week {iso[1]}</b>\n"
+                    f"Closing: <code>{', '.join(dropped)}</code>\n"
+                    f"Keeping/adjusting: <code>"
+                    f"{', '.join(s for s in snap.selected_symbols if s in self.positions) or 'none'}"
+                    f"</code>\n"
+                    f"New entries: <code>"
+                    f"{', '.join(s for s in snap.selected_symbols if s not in self.positions) or 'none'}"
+                    f"</code>"
+                ))
+                for sym in dropped:
+                    price = self.last_prices.get(sym, self.positions[sym]["entry_price"])
+                    await self._place_sell(sym, trigger="plan_change", exit_price=price)
+                    if self.positions:
+                        await asyncio.sleep(MIN_ORDER_GAP_S)
+
+            # 2. Delta-adjust carried positions still in the new plan
+            for sym in [s for s in snap.selected_symbols if s in self.positions]:
+                target_alloc = snap.capital_allocs.get(sym, 0.0)
+                if target_alloc < MIN_ORDER_USD:
+                    continue
+                pos   = self.positions[sym]
+                price = self.last_prices.get(sym, pos["entry_price"])
+                cur_val  = pos["shares"] * price
+                delta    = target_alloc - cur_val   # + = need more, - = have too much
+
+                if delta > MIN_ORDER_USD:
+                    log.info(f"Plan adjust: top-up {sym}  cur={_usd(cur_val)}  "
+                             f"tgt={_usd(target_alloc)}  delta=+{_usd(delta)}")
+                    regime = snap.regime.regime
+                    if regime == "BULL":
+                        stop_pct = P["bull_position_stop"]; tp_pct = 0.0
+                    elif regime == "BEAR":
+                        stop_pct = P["bear_position_stop"]
+                        tp_pct   = P["bear_rr_ratio"] * stop_pct
+                    else:
+                        stop_pct = P["sw_position_stop"]
+                        tp_pct   = P["sw_rr_ratio"] * stop_pct
+                    await self._place_delta_buy(
+                        sym=sym, delta_usd=delta, price=price,
+                        stop_pct=stop_pct, tp_pct=tp_pct, regime=regime,
+                        trigger="plan_adjust_topup")
+                    if not self._can_order():
+                        await asyncio.sleep(MIN_ORDER_GAP_S)
+
+                elif delta < -MIN_ORDER_USD:
+                    trim_usd = abs(delta)
+                    log.info(f"Plan adjust: trim {sym}  cur={_usd(cur_val)}  "
+                             f"tgt={_usd(target_alloc)}  delta=-{_usd(trim_usd)}")
+                    await self._place_delta_sell(
+                        sym=sym, trim_usd=trim_usd, price=price,
+                        trigger="plan_adjust_trim")
+                    if not self._can_order():
+                        await asyncio.sleep(MIN_ORDER_GAP_S)
 
             asyncio.create_task(self.tg.send(
-                f"📅 <b>New plan — {reason}</b>\n"
+                f"📅 <b>New plan — Monday week {iso[1]}</b>\n"
                 f"Regime: <code>{snap.regime.regime}</code>\n"
                 f"Selected: <code>{', '.join(snap.selected_symbols) or 'none'}</code>"
             ))
@@ -262,31 +345,27 @@ class TradingBot:
         await self._check_exits(snap)
 
         # 9. Daily micro-rebalance at 09:00 SGT
-        #    Trims or tops up each held position back toward its target weight.
-        #    Small enough to not change strategy; guaranteed to fire one order/day.
         if (now.hour == ROTATION_HOUR
                 and today != self._last_rebalance_date
                 and new_regime != "BEAR_GATE"
                 and not self._week_closed
-                and not too_late):
+                and not is_friday):
             await self._daily_rebalance(snap, now)
 
-        # 10. Enter unowned plan coins (1 order/cycle, Mon–Thu only)
+        # 10. Enter unowned plan coins (1 order/cycle, not on Friday)
         if (self._weekly_plan is not None
                 and new_regime != "BEAR_GATE"
                 and not self._week_closed
-                and not too_late):
+                and not is_friday):
             await self._enter_positions(self._weekly_plan, now)
 
         # 11. Daily guarantee — 20:00 SGT fallback: if no order placed today
-        #     and there are still unowned selected coins, force-enter the top one
-        #     regardless of red-day condition. Keeps competition activity count up.
         no_order_today = self._last_order_date != today
         if (now.hour == 20
                 and no_order_today
                 and new_regime != "BEAR_GATE"
                 and not self._week_closed
-                and not too_late
+                and not is_friday
                 and self._weekly_plan is not None
                 and any(s not in self.positions
                         for s in self._weekly_plan.selected_symbols)):
@@ -613,16 +692,12 @@ class TradingBot:
                                force: bool = False) -> None:
         """
         Enter unowned selected coins from the weekly plan, 1 order per cycle.
-
-        Entry timing mirrors the backtest exactly — this is critical:
-          SIDEWAYS/BEAR: wait for a red daily close (today's price < yesterday's).
-                         Fall back unconditionally on day 3+ since plan was made.
-                         (Mirrors backtest: red_day Mon-Wed, fallback Thursday)
-          BULL:          Enter immediately (breakout_open — momentum, don't wait).
-
-        force=True: daily guarantee — tiny token order (1% of capital), skips
-                    timing filter as absolute last resort for competition activity.
+        Never enters on Fri/Sat/Sun (too_late guard) — checked here as a
+        second safety layer in addition to the caller-side guard in _cycle.
         """
+        # Hard guard — never open new positions on Fri/Sat/Sun
+        if now.weekday() >= 4 and not force:
+            return
         GUARANTEE_ALLOC = max(self.capital * 0.01, 20.0)
 
         regime   = snap.regime.regime
@@ -635,43 +710,59 @@ class TradingBot:
         free_cash = max(self.capital - mtm_held, 0.0)
 
         unfilled  = [s for s in snap.selected_symbols if s not in self.positions]
-        if not unfilled:
+        # Also consider coins already held but undersized vs new target
+        # (carried from last week — plan_change delta may not have fired yet)
+        undersized = []
+        for sym in snap.selected_symbols:
+            if sym in self.positions and sym not in unfilled:
+                target = snap.capital_allocs.get(sym, 0.0)
+                cur    = self.positions[sym]["shares"] * self.last_prices.get(
+                    sym, self.positions[sym]["entry_price"])
+                if target - cur > MIN_ORDER_USD:
+                    undersized.append(sym)
+
+        if not unfilled and not undersized:
             return
         raw_total = sum(snap.capital_allocs.get(s, 0.0) for s in unfilled)
-        if raw_total <= 0:
-            return
 
-        for sym in unfilled:
+        for sym in unfilled + undersized:
             sig   = snap.signals.get(sym)
             price = self.last_prices.get(sym)
             if sig is None or price is None or math.isnan(price):
                 continue
 
+            is_topup = sym in undersized   # already held, just adding delta
+
             if force:
                 alloc   = GUARANTEE_ALLOC
                 trigger = "daily_guarantee"
 
+            elif is_topup:
+                # Carried position — just fill the gap to target, no timing gate
+                target  = snap.capital_allocs.get(sym, 0.0)
+                cur_val = self.positions[sym]["shares"] * price
+                alloc   = target - cur_val
+                trigger = "carry_topup"
+
             elif regime == "BULL":
-                # Momentum — enter immediately, don't wait for pullback
-                alloc   = snap.capital_allocs.get(sym, 0.0) * (free_cash / raw_total)
+                alloc   = snap.capital_allocs.get(sym, 0.0) * (free_cash / raw_total) \
+                          if raw_total > 0 else 0.0
                 alloc   = min(alloc, free_cash * 0.80)
                 trigger = "breakout_open"
 
             elif sig.is_red_day:
-                # Red daily close: today's price < yesterday's — ideal entry
-                alloc   = snap.capital_allocs.get(sym, 0.0) * (free_cash / raw_total)
+                alloc   = snap.capital_allocs.get(sym, 0.0) * (free_cash / raw_total) \
+                          if raw_total > 0 else 0.0
                 alloc   = min(alloc, free_cash * 0.80)
                 trigger = "red_day"
 
             elif plan_age >= 3:
-                # Day 3+ since plan: give up waiting, enter at current price
-                # (mirrors backtest Thursday open fallback)
-                alloc   = snap.capital_allocs.get(sym, 0.0) * (free_cash / raw_total)
+                alloc   = snap.capital_allocs.get(sym, 0.0) * (free_cash / raw_total) \
+                          if raw_total > 0 else 0.0
                 alloc   = min(alloc, free_cash * 0.80)
                 trigger = "fallback_thursday"
 
             else:
-                # Days 0-2 since plan, no red day yet — wait
                 log.debug(f"Waiting for red day: {sym} (plan day {plan_age})")
                 continue
 
@@ -681,12 +772,19 @@ class TradingBot:
             stop_price = price * (1.0 - sig.stop_pct)
             tp_price   = price * (1.0 + sig.tp_pct) if sig.tp_pct > 0 else float("inf")
 
-            placed = await self._place_buy(
-                sym=sym, alloc=alloc, price=price,
-                stop_price=stop_price, tp_price=tp_price,
-                regime=regime, entry_trigger=trigger)
+            if is_topup:
+                # Delta buy — merges into existing position
+                placed = await self._place_delta_buy(
+                    sym=sym, delta_usd=alloc, price=price,
+                    stop_pct=sig.stop_pct, tp_pct=sig.tp_pct,
+                    regime=regime, trigger=trigger)
+            else:
+                placed = await self._place_buy(
+                    sym=sym, alloc=alloc, price=price,
+                    stop_price=stop_price, tp_price=tp_price,
+                    regime=regime, entry_trigger=trigger)
             if placed:
-                return   # one buy per cycle
+                return   # one order per cycle
 
     # ── Weekly close ──────────────────────────────────────────────────────────
 
