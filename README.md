@@ -1,6 +1,10 @@
-# Introduction
+# Introduction & Goal
 
 This repository is made for the **SG vs HK Quant Hackathon 2026** by Roostoo.
+
+**Goal:** As the competition is only 10 days (21 Mar - 31 Mar 2026), we try to maximize the **average weekly returns** and **NOT the overall returns** for this model (as to give us the best chance at winning). Moreover, since the market is currently in sideways condition, we specialize the model to be better in sideways conditions while limiting upside from bullish movements and being protected from sudden bearish movements.
+
+We call this MRVS (Momentum-Reversal Variance Sizing).
 
 # Team & Contributors
 
