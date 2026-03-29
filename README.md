@@ -1,3 +1,16 @@
+# Introduction
+
+This repository is made for the **SG vs HK Quant Hackathon 2026** by Roostoo.
+
+# Team & Contributors
+
+Here is our team (Team150-I^4), alphabetical order:
+
+- Adriel Jansen Siahaya ([@adrieljss](https://github.com/adrieljss))
+- Kairav Shaurya Makhija ([@kai824](https://github.com/kai824))
+- Kelven Nathanael ([@KelvenN11](https://github.com/KelvenN11))
+- Neeraj Sankar
+
 # Setup
 
 0. Enter virtual env (optional)
@@ -89,7 +102,7 @@ Best for ranging, consolidating markets where prices oscillate without trend.
 - Positions: 3
 - Hard stop: −5% (checked against hourly low)
 - Trailing stop: activates once up 5%, trails 4% below peak
-- Take-profit: +15% (1:3 RR)
+- Take-profit: +5% (1:1 RR)
 - RSI early exit: close if RSI > 75 and position up > 3%
 
 **Research basis** — Dobrynskaya (2021) mean-reversion at 1-month+ horizon; BTC-neutral residual mean reversion (Sharpe ~2.3 post-2021 sideways regime).
@@ -129,7 +142,7 @@ Best for downtrending markets where capital preservation is the priority.
 - Positions: 2 (more selective)
 - Hard stop: −4% (tightest — capital preservation)
 - Trailing stop: activates once up 4%, trails 3% below peak
-- Take-profit: +8% (2:1 RR — take profits quickly before the next leg down)
+- Take-profit: +4% (1:1 RR — take profits quickly before the next leg down)
 - Size cap at 1.0× — never exceed base allocation in bear
 
 **Research basis** — Momentum crash literature (Grobys 2025); optimal timing of long-only exposure in bear markets.
@@ -206,18 +219,6 @@ Layer 3 — Portfolio stop
 └── backtest_results.png  Output: equity curve, weekly returns, drawdown
 ```
 
-### Setup
-
-```bash
-pip install pandas numpy requests tqdm matplotlib
-
-# Download data (re-run to get fresh hourly candles)
-python download_data.py --start 2023-01-01 --end 2025-03-31
-
-# Run backtest
-python backtest.py --start 2023-01-01 --end 2025-03-31
-```
-
 ### Key parameters to tune (top of `backtest.py`)
 
 | Parameter            | Default | Effect                                        |
@@ -228,8 +229,8 @@ python backtest.py --start 2023-01-01 --end 2025-03-31
 | `sw_position_stop`   | 0.05    | Sideways hard stop (−5%)                      |
 | `bull_position_stop` | 0.07    | Bull hard stop (−7%)                          |
 | `bear_position_stop` | 0.04    | Bear hard stop (−4%)                          |
-| `sw_rr_ratio`        | 3.0     | Sideways TP multiplier (3× stop = +15%)       |
-| `bear_rr_ratio`      | 2.0     | Bear TP multiplier (2× stop = +8%)            |
+| `sw_rr_ratio`        | 1.0     | Sideways TP multiplier (3× stop = +15%)       |
+| `bear_rr_ratio`      | 1.0     | Bear TP multiplier (2× stop = +8%)            |
 | `portfolio_stop`     | 0.12    | Portfolio-level liquidation threshold (−12%)  |
 
 ---
